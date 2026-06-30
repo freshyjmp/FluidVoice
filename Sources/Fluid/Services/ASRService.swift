@@ -549,7 +549,9 @@ final class ASRService: ObservableObject {
         (self.transcriptionProvider as? FluidAudioProvider)?.underlyingManager
     }
     #else
-    var asrManager: Any? { nil }
+    var asrManager: Any? {
+        nil
+    }
     #endif
 
     // Thread-safe buffer to prevent "Array mutation while enumerating" and memory corruption crashes
@@ -576,18 +578,18 @@ final class ASRService: ObservableObject {
     private var engineConfigurationChangeObserver: NSObjectProtocol?
     private var audioRouteRecoveryTask: Task<Void, Never>?
     private let audioRouteRecoveryDelayNanoseconds: UInt64 = 1_000_000_000
-    private let startupEngineConfigurationRecoveryDelayNanoseconds: UInt64 = 100_000_000
-    private let startupEngineConfigurationRecoveryWindowSeconds: TimeInterval = 2.0
+    private let startupRouteRecoveryDelayNs: UInt64 = 100_000_000
+    private let startupRouteRecoveryWindowSeconds: TimeInterval = 2.0
     private let startupCaptureReadyStableDelaySeconds: TimeInterval = 0.45
-    private let startupCaptureReadyAfterRecoveryDelaySeconds: TimeInterval = 0.10
+    private let startupCapturePostRecoveryDelaySeconds: TimeInterval = 0.10
     private let startupCaptureReadyTimeoutSeconds: TimeInterval = 1.75
     private let startupCaptureReadyPollNanoseconds: UInt64 = 25_000_000
-    private let startupCaptureReadyMinimumSamples = 2_048
+    private let startupCaptureReadyMinimumSamples = 2048
     private let stoppedEngineReuseGraceNanoseconds: UInt64 = 20_000_000_000
     private var lastEngineStartCompletedAt: TimeInterval?
-    private var startupEngineConfigurationRecoveryScheduled = false
-    private var startupEngineConfigurationRecoveryCompletedAt: TimeInterval?
-    private var startupEngineConfigurationRecoveryCompletedSampleCount: Int?
+    private var startupRouteRecoveryScheduled = false
+    private var startupRouteRecoveryCompletedAt: TimeInterval?
+    private var startupRouteRecoverySampleCount: Int?
     private var recordingSessionTracker = RecordingSessionTracker()
     private var stoppedEngineRetainedAt: TimeInterval?
     private var stoppedEngineReleaseTask: Task<Void, Never>?
@@ -604,7 +606,10 @@ final class ASRService: ObservableObject {
     private var didPauseMediaForThisSession: Bool = false
 
     private var audioLevelSubject = PassthroughSubject<CGFloat, Never>()
-    var audioLevelPublisher: AnyPublisher<CGFloat, Never> { self.audioLevelSubject.eraseToAnyPublisher() }
+    var audioLevelPublisher: AnyPublisher<CGFloat, Never> {
+        self.audioLevelSubject.eraseToAnyPublisher()
+    }
+
     private var lastAudioLevelSentAt: TimeInterval = 0
 
     var currentRecordingSessionID: UInt64? {
@@ -899,9 +904,9 @@ final class ASRService: ObservableObject {
         self.benchmarkCompletedStreamingChunks = 0
         self.benchmarkLastChunkSampleCount = 0
         self.lastEngineStartCompletedAt = nil
-        self.startupEngineConfigurationRecoveryScheduled = false
-        self.startupEngineConfigurationRecoveryCompletedAt = nil
-        self.startupEngineConfigurationRecoveryCompletedSampleCount = nil
+        self.startupRouteRecoveryScheduled = false
+        self.startupRouteRecoveryCompletedAt = nil
+        self.startupRouteRecoverySampleCount = nil
         self.streamingChunkAnalyticsSuccessCount = 0
         self.lastStreamingChunkFailureAnalyticsAt = nil
         (self.transcriptionProvider as? FluidAudioProvider)?.resetStreamingPreviewCache()
@@ -999,7 +1004,7 @@ final class ASRService: ObservableObject {
         let waitStartedAt = Date().timeIntervalSince1970
         let configuration = StartCueCaptureReadiness.Configuration(
             stableDelaySeconds: self.startupCaptureReadyStableDelaySeconds,
-            afterRecoveryDelaySeconds: self.startupCaptureReadyAfterRecoveryDelaySeconds,
+            afterRecoveryDelaySeconds: self.startupCapturePostRecoveryDelaySeconds,
             timeoutSeconds: self.startupCaptureReadyTimeoutSeconds,
             minimumSamples: self.startupCaptureReadyMinimumSamples
         )
@@ -1017,9 +1022,9 @@ final class ASRService: ObservableObject {
                     waitStartedAt: waitStartedAt,
                     sampleCount: sampleCount,
                     routeRecoveryIdle: routeRecoveryIdle,
-                    startupRecoveryScheduled: self.startupEngineConfigurationRecoveryScheduled,
-                    startupRecoveryCompletedAt: self.startupEngineConfigurationRecoveryCompletedAt,
-                    startupRecoveryCompletedSampleCount: self.startupEngineConfigurationRecoveryCompletedSampleCount,
+                    startupRecoveryScheduled: self.startupRouteRecoveryScheduled,
+                    startupRecoveryCompletedAt: self.startupRouteRecoveryCompletedAt,
+                    startupRecoveryCompletedSampleCount: self.startupRouteRecoverySampleCount,
                     engineStartedAt: self.lastEngineStartCompletedAt
                 ),
                 configuration: configuration
@@ -1033,7 +1038,7 @@ final class ASRService: ObservableObject {
                 )
                 return true
 
-            case .timedOut(let ready):
+            case let .timedOut(ready):
                 DebugLogger.shared.warning(
                     "Timed out waiting for capture-ready start cue (ready=\(ready), samples=\(sampleCount), readySamples=\(evaluation.readySampleCount), routeRecoveryIdle=\(routeRecoveryIdle), stableEnough=\(evaluation.stableEnough))",
                     source: "ASRService"
@@ -1542,7 +1547,12 @@ final class ASRService: ObservableObject {
 
     private func configureSession() throws {
         DebugLogger.shared.debug("🔧 configureSession() - ENTERED", source: "ASRService")
+        let configureStartedAt = Date().timeIntervalSince1970
         let hadExistingEngine = self.engineStorage != nil
+        let requiresOutputNode = self.requiresEngineOutputNode()
+        self.benchmarkLog(
+            "configure_session_start reusedEngine=\(hadExistingEngine) outputNodeRequired=\(requiresOutputNode)"
+        )
         let engine = self.engine
 
         if engine.isRunning {
@@ -1558,19 +1568,39 @@ final class ASRService: ObservableObject {
 
         // Force input node instantiation (ensures the underlying AUHAL AudioUnit exists)
         DebugLogger.shared.debug("📍 Forcing input node instantiation...", source: "ASRService")
+        let inputNodeStartedAt = Date().timeIntervalSince1970
         _ = engine.inputNode
         DebugLogger.shared.debug("Input node instantiated", source: "ASRService")
+        self.benchmarkLog("engine_input_node elapsedMs=\(self.elapsedMilliseconds(since: inputNodeStartedAt))")
 
-        // Force output node instantiation for output device binding
-        DebugLogger.shared.debug("📍 Forcing output node instantiation...", source: "ASRService")
-        _ = engine.outputNode
-        DebugLogger.shared.debug("✅ Output node instantiated", source: "ASRService")
+        if requiresOutputNode {
+            // Force output node instantiation only when independent output binding is actually needed.
+            DebugLogger.shared.debug("📍 Forcing output node instantiation...", source: "ASRService")
+            let outputNodeStartedAt = Date().timeIntervalSince1970
+            _ = engine.outputNode
+            DebugLogger.shared.debug("✅ Output node instantiated", source: "ASRService")
+            self.benchmarkLog("engine_output_node skipped=false elapsedMs=\(self.elapsedMilliseconds(since: outputNodeStartedAt))")
+        } else {
+            DebugLogger.shared.debug(
+                "Skipping output node instantiation; capture startup uses the system default output route",
+                source: "ASRService"
+            )
+            self.benchmarkLog("engine_output_node skipped=true reason=sync_mode_or_no_preferred_output")
+        }
 
         // NOTE: Device binding occurs in startEngine() BEFORE engine.prepare()
         // Per CoreAudio docs, device must be set before AudioUnit initialization (prepare)
-        // Since sync mode is always ON, binding actually no-ops and uses system defaults
+        // Since sync mode is always ON today, binding actually no-ops and uses system defaults
 
+        self.benchmarkLog("configure_session_end elapsedMs=\(self.elapsedMilliseconds(since: configureStartedAt))")
         DebugLogger.shared.debug("✅ configureSession() - COMPLETED", source: "ASRService")
+    }
+
+    private func requiresEngineOutputNode() -> Bool {
+        AudioEngineStartupPolicy.requiresOutputNode(
+            syncAudioDevicesWithSystem: SettingsStore.shared.syncAudioDevicesWithSystem,
+            preferredOutputDeviceUID: SettingsStore.shared.preferredOutputDeviceUID
+        )
     }
 
     /// In independent mode, attempt to bind AVAudioEngine's input to the user's preferred input device.
@@ -1892,12 +1922,27 @@ final class ASRService: ObservableObject {
                 // Note: This may fail for aggregate devices (Bluetooth, etc.) with OSStatus -10851
                 // In that case, we fall back to system defaults (same as sync mode)
                 DebugLogger.shared.debug("🎚️ Binding input device (before prepare)...", source: "ASRService")
+                let inputBindStartedAt = Date().timeIntervalSince1970
                 let inputBindOk = self.bindPreferredInputDeviceIfNeeded()
                 DebugLogger.shared.debug("✅ Input device binding result: \(inputBindOk)", source: "ASRService")
+                self.benchmarkLog(
+                    "engine_input_bind ok=\(inputBindOk) elapsedMs=\(self.elapsedMilliseconds(since: inputBindStartedAt))"
+                )
 
-                DebugLogger.shared.debug("🔊 Binding output device (before prepare)...", source: "ASRService")
-                let outputBindOk = self.bindPreferredOutputDeviceIfNeeded()
-                DebugLogger.shared.debug("✅ Output device binding result: \(outputBindOk)", source: "ASRService")
+                let outputBindOk: Bool
+                if self.requiresEngineOutputNode() {
+                    DebugLogger.shared.debug("🔊 Binding output device (before prepare)...", source: "ASRService")
+                    let outputBindStartedAt = Date().timeIntervalSince1970
+                    outputBindOk = self.bindPreferredOutputDeviceIfNeeded()
+                    DebugLogger.shared.debug("✅ Output device binding result: \(outputBindOk)", source: "ASRService")
+                    self.benchmarkLog(
+                        "engine_output_bind skipped=false ok=\(outputBindOk) elapsedMs=\(self.elapsedMilliseconds(since: outputBindStartedAt))"
+                    )
+                } else {
+                    outputBindOk = true
+                    DebugLogger.shared.debug("Skipping output device binding; no engine output node is required", source: "ASRService")
+                    self.benchmarkLog("engine_output_bind skipped=true reason=sync_mode_or_no_preferred_output")
+                }
 
                 // If binding failed (e.g., aggregate device), engine will use system defaults
                 if !inputBindOk || !outputBindOk {
@@ -1910,8 +1955,10 @@ final class ASRService: ObservableObject {
                 // Prepare the engine to allocate resources and establish format SYNCHRONOUSLY
                 // This ensures the audio graph is fully initialized before we proceed
                 DebugLogger.shared.debug("📋 Preparing engine (allocating resources)...", source: "ASRService")
+                let prepareStartedAt = Date().timeIntervalSince1970
                 self.engine.prepare()
                 DebugLogger.shared.debug("✅ Engine prepared", source: "ASRService")
+                self.benchmarkLog("engine_prepare elapsedMs=\(self.elapsedMilliseconds(since: prepareStartedAt))")
 
                 // Log engine state before attempting to start
                 let inputNode = self.engine.inputNode
@@ -1923,8 +1970,12 @@ final class ASRService: ObservableObject {
                     source: "ASRService"
                 )
 
+                let engineStartStartedAt = Date().timeIntervalSince1970
                 try self.engine.start()
                 self.lastEngineStartCompletedAt = Date().timeIntervalSince1970
+                self.benchmarkLog(
+                    "engine_start attempt=\(attempts + 1) elapsedMs=\(self.elapsedMilliseconds(since: engineStartStartedAt))"
+                )
                 DebugLogger.shared.info("AVAudioEngine started successfully on attempt \(attempts + 1)", source: "ASRService")
                 return
             } catch {
@@ -2046,9 +2097,9 @@ final class ASRService: ObservableObject {
         self.audioRouteRecoveryTask?.cancel()
         let isStartupEngineConfigurationRecovery = self.isStartupEngineConfigurationRecovery(reason: reason)
         if isStartupEngineConfigurationRecovery {
-            self.startupEngineConfigurationRecoveryScheduled = true
-            self.startupEngineConfigurationRecoveryCompletedAt = nil
-            self.startupEngineConfigurationRecoveryCompletedSampleCount = nil
+            self.startupRouteRecoveryScheduled = true
+            self.startupRouteRecoveryCompletedAt = nil
+            self.startupRouteRecoverySampleCount = nil
         } else {
             self.clearStartupCaptureReadiness(reason: "route_recovery_replaced_by_\(reason)")
             self.audioCapturePipeline.setRecordingEnabled(false)
@@ -2071,7 +2122,7 @@ final class ASRService: ObservableObject {
 
     private func recoveryDelayNanoseconds(for reason: String) -> UInt64 {
         self.isStartupEngineConfigurationRecovery(reason: reason)
-            ? self.startupEngineConfigurationRecoveryDelayNanoseconds
+            ? self.startupRouteRecoveryDelayNs
             : self.audioRouteRecoveryDelayNanoseconds
     }
 
@@ -2081,19 +2132,19 @@ final class ASRService: ObservableObject {
         else { return false }
 
         let startAge = Date().timeIntervalSince1970 - lastEngineStartCompletedAt
-        return startAge >= 0 && startAge <= self.startupEngineConfigurationRecoveryWindowSeconds
+        return startAge >= 0 && startAge <= self.startupRouteRecoveryWindowSeconds
     }
 
     private func clearStartupCaptureReadiness(reason: String) {
-        if self.startupEngineConfigurationRecoveryScheduled ||
-            self.startupEngineConfigurationRecoveryCompletedAt != nil ||
-            self.startupEngineConfigurationRecoveryCompletedSampleCount != nil
+        if self.startupRouteRecoveryScheduled ||
+            self.startupRouteRecoveryCompletedAt != nil ||
+            self.startupRouteRecoverySampleCount != nil
         {
             self.benchmarkLog("startup_capture_readiness_reset reason=\(reason)")
         }
-        self.startupEngineConfigurationRecoveryScheduled = false
-        self.startupEngineConfigurationRecoveryCompletedAt = nil
-        self.startupEngineConfigurationRecoveryCompletedSampleCount = nil
+        self.startupRouteRecoveryScheduled = false
+        self.startupRouteRecoveryCompletedAt = nil
+        self.startupRouteRecoverySampleCount = nil
     }
 
     @MainActor
@@ -2131,9 +2182,9 @@ final class ASRService: ObservableObject {
             }
 
             DebugLogger.shared.info("Audio route recovery succeeded", source: "ASRService")
-            if reason == "engine configuration changed", self.startupEngineConfigurationRecoveryScheduled {
-                self.startupEngineConfigurationRecoveryCompletedAt = Date().timeIntervalSince1970
-                self.startupEngineConfigurationRecoveryCompletedSampleCount = self.audioBuffer.count
+            if reason == "engine configuration changed", self.startupRouteRecoveryScheduled {
+                self.startupRouteRecoveryCompletedAt = Date().timeIntervalSince1970
+                self.startupRouteRecoverySampleCount = self.audioBuffer.count
             }
         } catch {
             DebugLogger.shared.error("Audio route recovery failed: \(error)", source: "ASRService")
@@ -2480,7 +2531,7 @@ final class ASRService: ObservableObject {
         return nil
     }
 
-    // Device caching for change detection
+    /// Device caching for change detection
     private var cachedDeviceUIDs: Set<String> = []
 
     private func cacheCurrentDeviceList(_ devices: [AudioDevice.Device]) {
@@ -3393,6 +3444,19 @@ private extension ASRService {
         self.benchmarkLog("fast_preview_stop_grace forced_chunk=true coverage=\(String(format: "%.3f", coverage)) tailMs=\(tailMs) samples=\(currentSampleCount)")
         await self.processStreamingChunk()
         self.benchmarkLog("fast_preview_stop_grace done elapsedMs=\(self.elapsedMilliseconds(since: startedAt)) samples=\(self.audioBuffer.count)")
+    }
+}
+
+// MARK: - Audio engine startup policy
+
+enum AudioEngineStartupPolicy {
+    static func requiresOutputNode(
+        syncAudioDevicesWithSystem: Bool,
+        preferredOutputDeviceUID: String?
+    ) -> Bool {
+        guard syncAudioDevicesWithSystem == false else { return false }
+        guard let preferredOutputDeviceUID else { return false }
+        return preferredOutputDeviceUID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 }
 

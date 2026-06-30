@@ -1,5 +1,5 @@
-@testable import FluidVoice_Debug
 import CoreAudio
+@testable import FluidVoice_Debug
 import XCTest
 
 final class StartCueCaptureReadinessTests: XCTestCase {
@@ -7,7 +7,7 @@ final class StartCueCaptureReadinessTests: XCTestCase {
         stableDelaySeconds: 0.45,
         afterRecoveryDelaySeconds: 0.10,
         timeoutSeconds: 1.75,
-        minimumSamples: 2_048
+        minimumSamples: 2048
     )
 
     func testRestartInvalidatesPreviousRecordingSession() {
@@ -30,7 +30,7 @@ final class StartCueCaptureReadinessTests: XCTestCase {
             self.snapshot(
                 activeSessionID: 2,
                 requestedSessionID: 1,
-                sampleCount: 4_096,
+                sampleCount: 4096,
                 engineStartedAt: 9.0
             ),
             configuration: self.configuration
@@ -42,9 +42,9 @@ final class StartCueCaptureReadinessTests: XCTestCase {
     func testPostRecoveryReadinessRequiresSamplesAfterRecovery() {
         let waiting = StartCueCaptureReadiness.evaluate(
             self.snapshot(
-                sampleCount: 4_096,
+                sampleCount: 4096,
                 startupRecoveryCompletedAt: 10.0,
-                startupRecoveryCompletedSampleCount: 4_096
+                startupRecoveryCompletedSampleCount: 4096
             ),
             configuration: self.configuration
         )
@@ -54,15 +54,15 @@ final class StartCueCaptureReadinessTests: XCTestCase {
 
         let ready = StartCueCaptureReadiness.evaluate(
             self.snapshot(
-                sampleCount: 6_144,
+                sampleCount: 6144,
                 startupRecoveryCompletedAt: 10.0,
-                startupRecoveryCompletedSampleCount: 4_096
+                startupRecoveryCompletedSampleCount: 4096
             ),
             configuration: self.configuration
         )
 
         XCTAssertEqual(ready.decision, .ready)
-        XCTAssertEqual(ready.readySampleCount, 2_048)
+        XCTAssertEqual(ready.readySampleCount, 2048)
     }
 
     func testTimeoutFallbackStillRequiresCurrentSessionSamplesAndIdleRouteRecovery() {
@@ -72,7 +72,7 @@ final class StartCueCaptureReadinessTests: XCTestCase {
                 requestedSessionID: 1,
                 now: 12.0,
                 waitStartedAt: 10.0,
-                sampleCount: 4_096,
+                sampleCount: 4096,
                 engineStartedAt: 11.9
             ),
             configuration: self.configuration
@@ -96,7 +96,7 @@ final class StartCueCaptureReadinessTests: XCTestCase {
             self.snapshot(
                 now: 12.0,
                 waitStartedAt: 10.0,
-                sampleCount: 4_096,
+                sampleCount: 4096,
                 routeRecoveryIdle: false,
                 engineStartedAt: 9.0
             ),
@@ -128,6 +128,39 @@ final class StartCueCaptureReadinessTests: XCTestCase {
         )
 
         XCTAssertFalse(AudioDevice.isBluetoothDevice(builtInMic))
+    }
+
+    func testStartupPolicySkipsOutputNodeWhenSystemDeviceSyncIsEnabled() {
+        XCTAssertFalse(
+            AudioEngineStartupPolicy.requiresOutputNode(
+                syncAudioDevicesWithSystem: true,
+                preferredOutputDeviceUID: "external-speakers"
+            )
+        )
+    }
+
+    func testStartupPolicySkipsOutputNodeWhenIndependentOutputHasNoPreferredDevice() {
+        XCTAssertFalse(
+            AudioEngineStartupPolicy.requiresOutputNode(
+                syncAudioDevicesWithSystem: false,
+                preferredOutputDeviceUID: nil
+            )
+        )
+        XCTAssertFalse(
+            AudioEngineStartupPolicy.requiresOutputNode(
+                syncAudioDevicesWithSystem: false,
+                preferredOutputDeviceUID: "  "
+            )
+        )
+    }
+
+    func testStartupPolicyRequiresOutputNodeForIndependentPreferredOutput() {
+        XCTAssertTrue(
+            AudioEngineStartupPolicy.requiresOutputNode(
+                syncAudioDevicesWithSystem: false,
+                preferredOutputDeviceUID: "external-speakers"
+            )
+        )
     }
 
     private func snapshot(
